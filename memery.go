@@ -1,8 +1,6 @@
 package cache
 
-import (
-	"hash/fnv"
-)
+import "hash/fnv"
 
 func NewMemery() Cache {
 	m := &memery{}
@@ -47,7 +45,5 @@ func (m *memery) hashKey(k []byte) (uint8, uint16) {
 	h := fnv.New32()
 	h.Write(k)
 	v := h.Sum32()
-	return uint8(v >> 24), uint16(v & 0xFFFF)
-
-	// return 1, uint16(v | 0xFFFF)
+	return uint8(v >> 24), uint16(v)
 }
