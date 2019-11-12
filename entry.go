@@ -4,7 +4,7 @@ import (
 	"unsafe"
 )
 
-type entry struct {
+type Entry struct {
 	ek    uint16
 	ctime int64
 	ex    int64
@@ -12,10 +12,18 @@ type entry struct {
 	k     []byte
 }
 
-func (e *entry) storeValue(i *interface{}) {
+func (e *Entry) Key() []byte {
+	return e.k
+}
+
+func (e *Entry) StoreValue(i *interface{}) {
 	e.p = unsafe.Pointer(i)
 }
 
-func (e *entry) loadValue() interface{} {
+func (e *Entry) LoadValue() interface{} {
 	return *(*interface{})(e.p)
+}
+
+func (e *Entry) Expired() bool {
+	return e.ex+e.ctime < nowTime()
 }

@@ -79,6 +79,72 @@ func (n *nodeGetter) get(p *node) *node {
 	return n.get(p.left)
 }
 
+type nodeIterator struct {
+	fn func(interface{}) bool
+}
+
+func (n *nodeIterator) iterate(p *node) bool {
+	if p == nil {
+		return true
+	}
+	if p.left != nil {
+		if !n.iterate(p.left) {
+			return false
+		}
+	}
+	if p.right != nil {
+		if !n.iterate(p.right) {
+			return false
+		}
+	}
+	return n.fn(p.val)
+}
+
+type nodeDeleter struct {
+	hashKey uint16
+	key     []byte
+}
+
+func (n *nodeDeleter) findMax(p *node) *node {
+	if p == nil {
+		return nil
+	}
+	for p.right != nil {
+		p = p.right
+	}
+	return p
+}
+
+func (n *nodeDeleter) del(p *node) *node {
+	if p == nil {
+		return nil
+	}
+	if n.hashKey < p.hashKey {
+		p.left = n.del(p.left)
+	} else if n.hashKey > p.hashKey {
+		p.right = n.del(p.right)
+	} else if !bytes.Equal(n.key, p.key) {
+		p.left = n.del(p.left)
+	} else {
+		if p.left != nil && p.right != nil {
+			tmp := n.findMax(p.left)
+			p.key = tmp.key
+			p.hashKey = tmp.hashKey
+			p.val = tmp.val
+			n.key = tmp.key
+			n.hashKey = tmp.hashKey
+			p.left = n.del(p.left)
+		} else if p.left == nil {
+			p = p.right
+		} else if p.right == nil {
+			p = p.left
+		} else {
+			p = nil
+		}
+	}
+	return p
+}
+
 type AVLTree struct {
 	root *node
 }
@@ -96,4 +162,14 @@ func (t *AVLTree) Get(key []byte, hashKey uint16) interface{} {
 		return nil
 	}
 	return p.val
+}
+
+func (t *AVLTree) Iterator(fn func(interface{}) bool) {
+	n := &nodeIterator{fn: fn}
+	n.iterate(t.root)
+}
+
+func (t *AVLTree) Del(key []byte, hashKey uint16) {
+	n := &nodeDeleter{key: key, hashKey: hashKey}
+	t.root = n.del(t.root)
 }
