@@ -1,15 +1,18 @@
 package cache
 
 import (
+	"github.com/go-comm/cache/internal/timingwheel"
 	"unsafe"
 )
 
 type Entry struct {
-	ek    uint16
-	ctime int64
-	ex    int64
-	p     unsafe.Pointer // *interface{}
-	k     []byte
+	bk     uint8
+	ek     uint16
+	ctime  int64
+	ex     int64
+	p      unsafe.Pointer // *interface{}
+	k      []byte
+	future timingwheel.Future
 }
 
 func (e *Entry) Key() []byte {

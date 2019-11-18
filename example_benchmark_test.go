@@ -8,7 +8,7 @@ import (
 
 func Benchmark_MemeryPut(b *testing.B) {
 	b.StopTimer()
-	m := NewMemery()
+	m := New()
 	var key [8]byte
 
 	b.StartTimer()

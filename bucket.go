@@ -1,7 +1,11 @@
 package cache
 
 import (
+	"context"
 	"sync"
+	"time"
+
+	"github.com/go-comm/cache/internal/timingwheel"
 )
 
 func newBucket() *bucket {
@@ -11,12 +15,12 @@ func newBucket() *bucket {
 }
 
 type bucket struct {
-	sync.RWMutex
-
-	_    [8]uint64
-	size int
-	bk   uint16
-	data *AVLTree
+	mutex sync.RWMutex
+	_     [8]uint64
+	wheel timingwheel.TimingWheel
+	size  int
+	bk    uint8
+	data  *AVLTree
 }
 
 func (b *bucket) getExpiredEntries(es []*Entry) []*Entry {
@@ -32,7 +36,9 @@ func (b *bucket) getExpiredEntries(es []*Entry) []*Entry {
 }
 
 func (b *bucket) getEntry(k []byte, ek uint16) *Entry {
+	b.mutex.RLock()
 	ei := b.data.Get(k, ek)
+	b.mutex.RUnlock()
 	if ei == nil {
 		return nil
 	}
@@ -78,26 +84,44 @@ func (b *bucket) put(k []byte, ek uint16, v *interface{}, ex int64, updateEx boo
 	e := &Entry{}
 	e.k = k
 	e.ctime = nowTime()
+	e.bk = b.bk
 	e.ek = ek
 	e.ex = ex
 	e.StoreValue(v)
-	oe := b.data.Set(k, ek, e)
-	if !updateEx && oe != nil {
-		if oldEntry, ok := oe.(*Entry); ok {
-			e.ex = oldEntry.ex
+
+	b.mutex.Lock()
+	ie := b.data.Set(k, ek, e)
+	b.mutex.Unlock()
+
+	if ie != nil {
+		olde := ie.(*Entry)
+		if olde.future != nil {
+			olde.future.Cancel()
+		}
+		if !updateEx {
+			e.ex = olde.ex
 		}
 	}
+
+	ctx := context.Background()
+	ctx = context.WithValue(ctx, _ContextKeyCacheKey, k)
+	ctx = context.WithValue(ctx, _ContextKeyCacheHashKey, ek)
+	e.future = b.wheel.PostDelayed(ctx, b.expireCallback, time.Duration(ex)*time.Millisecond)
 }
 
 func (b *bucket) del(k []byte, ek uint16) {
+	b.mutex.Lock()
 	b.data.Del(k, ek)
+	b.mutex.Unlock()
 }
 
-func (b *bucket) list(es []*Entry) []*Entry {
-	b.data.Iterator(func(v interface{}) bool {
-		e := v.(*Entry)
-		es = append(es, e)
-		return true
-	})
-	return es
+func (b *bucket) expireCallback(ctx context.Context) error {
+	ik := ctx.Value(_ContextKeyCacheKey)
+	iek := ctx.Value(_ContextKeyCacheHashKey)
+	if ik != nil && iek != nil {
+		k := ik.([]byte)
+		ek := iek.(uint16)
+		b.del(k, ek)
+	}
+	return nil
 }
