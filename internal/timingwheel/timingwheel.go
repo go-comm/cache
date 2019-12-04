@@ -249,7 +249,7 @@ func (w *timingWheel) Remove(token []byte) {
 			break
 		}
 	}
-	b.mutex.Unlock()
+	b.mutex.RUnlock()
 
 	if find != nil {
 		find.Cancel()
