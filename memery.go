@@ -2,6 +2,7 @@ package cache
 
 import (
 	"encoding/json"
+	"log"
 	"sync"
 	"time"
 )
@@ -11,12 +12,7 @@ func now() int64 {
 }
 
 /**
-
-args:
-{
-	cap:1000
-}
-
+args: "{cap:1000}"
 */
 
 func NewMemery(args ...string) Cache {
@@ -62,19 +58,29 @@ func (e *entry) TTL() int64 {
 }
 
 type bucket struct {
-	store map[string]*entry
 	mutex sync.RWMutex
+	_     [6]uint64
 	m     *memory
+	store map[string]*entry
 }
 
 func (b *bucket) expire() {
+	defer func() {
+		if err := recover(); err != nil {
+			log.Println(err)
+		}
+	}()
 	var keys []string
 	var vals []interface{}
+	h := b.m.expireHandler
+
 	b.mutex.RLock()
 	for k, v := range b.store {
 		if v != nil && v.Expired() {
 			keys = append(keys, k)
-			vals = append(vals, v.v)
+			if h != nil {
+				vals = append(vals, v.v)
+			}
 		}
 	}
 	b.mutex.RUnlock()
@@ -87,8 +93,7 @@ func (b *bucket) expire() {
 		b.mutex.Unlock()
 	}
 
-	h := b.m.expireHandler
-	if h != nil {
+	if h != nil && len(vals) > 0 {
 		for _, v := range vals {
 			h(v)
 		}
@@ -105,7 +110,7 @@ func (m *memory) expireInLoop() {
 	ticker := time.NewTicker(time.Second * 10)
 	for {
 		<-ticker.C
-		for i := 0; i < len(m.buckets); i++ {
+		for i := len(m.buckets) - 1; i >= 0; i-- {
 			b := m.buckets[i]
 			b.expire()
 		}
@@ -173,8 +178,11 @@ func (m *memory) TTL(k []byte) (int64, error) {
 	b.mutex.RLock()
 	e, ok := b.store[key]
 	b.mutex.RUnlock()
+	if !ok {
+		return 0, ErrNoKey
+	}
 	ttl := e.TTL()
-	if !ok || ttl == 0 {
+	if ttl == 0 {
 		return 0, ErrNoKey
 	}
 	return ttl, nil
