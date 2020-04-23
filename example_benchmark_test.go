@@ -7,8 +7,7 @@ import (
 )
 
 func Benchmark_MemeryPut(b *testing.B) {
-	b.StopTimer()
-	m := New()
+	m := NewMemery()
 	var key [8]byte
 
 	b.StartTimer()
@@ -16,10 +15,11 @@ func Benchmark_MemeryPut(b *testing.B) {
 		binary.LittleEndian.PutUint64(key[:], uint64(i))
 		m.Put(key[:], make([]byte, 8))
 	}
+	b.StopTimer()
 }
 
 func Benchmark_MapSet(b *testing.B) {
-	b.StopTimer()
+
 	m := make(map[string][]byte)
 	var key [8]byte
 
@@ -28,10 +28,10 @@ func Benchmark_MapSet(b *testing.B) {
 		binary.LittleEndian.PutUint64(key[:], uint64(i))
 		m[string(key[:])] = make([]byte, 8)
 	}
+	b.StopTimer()
 }
 
 func Benchmark_SyncMapStore(b *testing.B) {
-	b.StopTimer()
 	m := &sync.Map{}
 	var key [8]byte
 
@@ -40,4 +40,5 @@ func Benchmark_SyncMapStore(b *testing.B) {
 		binary.LittleEndian.PutUint64(key[:], uint64(i))
 		m.Store(string(key[:]), make([]byte, 8))
 	}
+	b.StopTimer()
 }

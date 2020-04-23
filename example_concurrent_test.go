@@ -8,7 +8,7 @@ import (
 
 func Test_Concurrent_Memery(t *testing.T) {
 	var wg sync.WaitGroup
-	m := New()
+	m := NewMemery()
 	N := 10000
 	goroutines := 200
 	wg.Add(goroutines)

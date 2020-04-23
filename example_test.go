@@ -6,7 +6,7 @@ import (
 
 func Test_Memery(t *testing.T) {
 
-	m := New()
+	m := NewMemery()
 
 	m.Put([]byte("user"), "admin")
 	t.Log(m.Get([]byte("user")))
@@ -16,6 +16,8 @@ func Test_Memery(t *testing.T) {
 
 	m.Put([]byte("user"), "guest")
 	t.Log(m.Get([]byte("user")))
+
+	t.Log(m.Get([]byte("user1")))
 
 	t.Log(m.Get([]byte("user2")))
 
