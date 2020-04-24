@@ -107,7 +107,7 @@ type memory struct {
 }
 
 func (m *memory) expireInLoop() {
-	ticker := time.NewTicker(time.Second * 10)
+	ticker := time.NewTicker(time.Second * 5)
 	for {
 		<-ticker.C
 		for i := len(m.buckets) - 1; i >= 0; i-- {
@@ -169,6 +169,10 @@ func (m *memory) Del(k []byte) error {
 	b.mutex.Lock()
 	delete(b.store, key)
 	b.mutex.Unlock()
+	h := m.expireHandler
+	if h != nil {
+		h(e.v)
+	}
 	return nil
 }
 
