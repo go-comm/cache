@@ -2,7 +2,9 @@ package cache
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"reflect"
 )
 
 func Byte(v interface{}, err error) (byte, error) {
@@ -135,4 +137,15 @@ func Buffer(v interface{}, err error) (*bytes.Buffer, error) {
 		return nil, fmt.Errorf("cache: can't convert %v to *bytes.Buffer", v)
 	}
 	return o, nil
+}
+
+func UnsafeConvert(dst interface{}, src interface{}) {
+	refDst := reflect.ValueOf(dst)
+	refSrc := reflect.ValueOf(src)
+
+	if refSrc.Kind() != reflect.Ptr || refDst.Kind() != reflect.Ptr {
+		panic(errors.New("cache: both src and dst must be ptr"))
+	}
+
+	refDst.Elem().Set(refSrc)
 }

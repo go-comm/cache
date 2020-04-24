@@ -35,3 +35,21 @@ func ViewEx(k []byte, ex int64, c Cache, fn func() (interface{}, error)) (interf
 	c.PutEx(k, v, ex)
 	return v, nil
 }
+
+func UnsafeViewEx(k []byte, v interface{}, ex int64, c Cache, fn func() (interface{}, error)) error {
+	d, err := c.Get(k)
+	if err == nil {
+		UnsafeConvert(v, d)
+		return nil
+	}
+	if fn == nil {
+		return errors.New("function is nil")
+	}
+	d, err = fn()
+	if err != nil {
+		return err
+	}
+	UnsafeConvert(v, d)
+	c.PutEx(k, d, ex)
+	return nil
+}
