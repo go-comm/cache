@@ -88,7 +88,11 @@ func (b *bucket) expire() {
 	if len(keys) > 0 {
 		b.mutex.Lock()
 		for _, k := range keys {
-			delete(b.store, k)
+			if e, ok := b.store[k]; ok {
+				if e != nil && e.Expired() {
+					delete(b.store, k)
+				}
+			}
 		}
 		b.mutex.Unlock()
 	}
