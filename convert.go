@@ -143,8 +143,8 @@ func UnsafeConvert(dst interface{}, src interface{}) {
 	refDst := reflect.ValueOf(dst)
 	refSrc := reflect.ValueOf(src)
 
-	if refSrc.Kind() != reflect.Ptr || refDst.Kind() != reflect.Ptr {
-		panic(errors.New("cache: both src and dst must be ptr"))
+	if refDst.Kind() != reflect.Ptr {
+		panic(errors.New("cache: dst must be ptr"))
 	}
 
 	refDst.Elem().Set(refSrc)
