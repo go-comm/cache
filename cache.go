@@ -8,6 +8,7 @@ var ErrNoKey = errors.New("cache: no key")
 
 type Cache interface {
 	Get(k []byte) (interface{}, error)
+	GetAndTTL(k []byte) (interface{}, int64, error)
 	Put(k []byte, v interface{}) error
 	PutEx(k []byte, v interface{}, sec int64) error
 	Del(k []byte) error

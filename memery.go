@@ -141,6 +141,18 @@ func (m *memory) Get(k []byte) (interface{}, error) {
 	return e.v, nil
 }
 
+func (m *memory) GetAndTTL(k []byte) (interface{}, int64, error) {
+	b := m.buckets[m.hashKey(k)]
+	key := string(k)
+	b.mutex.RLock()
+	e, ok := b.store[key]
+	b.mutex.RUnlock()
+	if !ok || e.Expired() {
+		return nil, 0, ErrNoKey
+	}
+	return e.v, e.TTL(), nil
+}
+
 func (m *memory) Put(k []byte, v interface{}) error {
 	b := m.buckets[m.hashKey(k)]
 	e := &entry{ctime: now(), ex: -1, v: v}
