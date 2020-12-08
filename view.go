@@ -1,11 +1,12 @@
 package cache
 
 import (
+	"context"
 	"errors"
 )
 
-func View(k []byte, c Cache, fn func() (interface{}, error)) (interface{}, error) {
-	v, err := c.Get(k)
+func View(ctx context.Context, k []byte, c Cache, fn func() (interface{}, error)) (interface{}, error) {
+	v, err := c.Get(ctx, k)
 	if err == nil {
 		return v, nil
 	}
@@ -16,12 +17,12 @@ func View(k []byte, c Cache, fn func() (interface{}, error)) (interface{}, error
 	if err != nil {
 		return nil, err
 	}
-	c.Put(k, v)
+	c.Put(ctx, k, v)
 	return v, nil
 }
 
-func ViewEx(k []byte, ex int64, c Cache, fn func() (interface{}, error)) (interface{}, error) {
-	v, err := c.Get(k)
+func ViewEx(ctx context.Context, k []byte, ex int64, c Cache, fn func() (interface{}, error)) (interface{}, error) {
+	v, err := c.Get(ctx, k)
 	if err == nil {
 		return v, nil
 	}
@@ -32,12 +33,12 @@ func ViewEx(k []byte, ex int64, c Cache, fn func() (interface{}, error)) (interf
 	if err != nil {
 		return nil, err
 	}
-	c.PutEx(k, v, ex)
+	c.PutEx(ctx, k, v, ex)
 	return v, nil
 }
 
-func UnsafeViewEx(k []byte, v interface{}, ex int64, c Cache, fn func() (interface{}, error)) error {
-	d, err := c.Get(k)
+func UnsafeViewEx(ctx context.Context, k []byte, v interface{}, ex int64, c Cache, fn func() (interface{}, error)) error {
+	d, err := c.Get(ctx, k)
 	if err == nil {
 		UnsafeConvert(v, d)
 		return nil
@@ -50,6 +51,6 @@ func UnsafeViewEx(k []byte, v interface{}, ex int64, c Cache, fn func() (interfa
 		return err
 	}
 	UnsafeConvert(v, d)
-	c.PutEx(k, d, ex)
+	c.PutEx(ctx, k, d, ex)
 	return nil
 }

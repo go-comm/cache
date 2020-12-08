@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"sync"
@@ -36,9 +37,9 @@ func NewMemery(args ...string) Cache {
 }
 
 type entry struct {
-	ctime int64
-	ex    int64
-	v     interface{}
+	createAt int64
+	expireAt int64
+	v        interface{}
 }
 
 func (e *entry) Expired() bool {
@@ -47,10 +48,10 @@ func (e *entry) Expired() bool {
 
 // TTL -1: never expired, 0: expired, >0: not expired
 func (e *entry) TTL() int64 {
-	if e.ex < 0 {
+	if e.expireAt < 0 {
 		return -1
 	}
-	ttl := e.ex + e.ctime - now()
+	ttl := e.expireAt - now()
 	if ttl < 0 {
 		ttl = 0
 	}
@@ -98,8 +99,8 @@ func (b *bucket) expire() {
 	}
 
 	if h != nil && len(vals) > 0 {
-		for _, v := range vals {
-			h(v)
+		for i, v := range vals {
+			h([]byte(keys[i]), v)
 		}
 	}
 
@@ -107,7 +108,7 @@ func (b *bucket) expire() {
 
 type memory struct {
 	buckets       [256]*bucket
-	expireHandler func(interface{})
+	expireHandler func([]byte, interface{})
 }
 
 func (m *memory) expireInLoop() {
@@ -129,7 +130,7 @@ func (m *memory) hashKey(k []byte) uint8 {
 	return uint8(hashed & 0xff)
 }
 
-func (m *memory) Get(k []byte) (interface{}, error) {
+func (m *memory) Get(ctx context.Context, k []byte) (interface{}, error) {
 	b := m.buckets[m.hashKey(k)]
 	key := string(k)
 	b.mutex.RLock()
@@ -141,21 +142,25 @@ func (m *memory) Get(k []byte) (interface{}, error) {
 	return e.v, nil
 }
 
-func (m *memory) GetAndTTL(k []byte) (interface{}, int64, error) {
+func (m *memory) GetAndTTL(ctx context.Context, k []byte) (interface{}, int64, error) {
 	b := m.buckets[m.hashKey(k)]
 	key := string(k)
 	b.mutex.RLock()
 	e, ok := b.store[key]
 	b.mutex.RUnlock()
-	if !ok || e.Expired() {
+	if !ok {
 		return nil, 0, ErrNoKey
 	}
-	return e.v, e.TTL(), nil
+	ttl := e.TTL()
+	if ttl == 0 {
+		return nil, 0, ErrNoKey
+	}
+	return e.v, ttl, nil
 }
 
-func (m *memory) Put(k []byte, v interface{}) error {
+func (m *memory) Put(ctx context.Context, k []byte, v interface{}) error {
 	b := m.buckets[m.hashKey(k)]
-	e := &entry{ctime: now(), ex: -1, v: v}
+	e := &entry{createAt: now(), expireAt: -1, v: v}
 	key := BytesToString(k)
 	b.mutex.Lock()
 	b.store[key] = e
@@ -163,9 +168,14 @@ func (m *memory) Put(k []byte, v interface{}) error {
 	return nil
 }
 
-func (m *memory) PutEx(k []byte, v interface{}, sec int64) error {
+func (m *memory) PutEx(ctx context.Context, k []byte, v interface{}, sec int64) error {
 	b := m.buckets[m.hashKey(k)]
-	e := &entry{ctime: now(), ex: sec, v: v}
+	createAt := now()
+	expireAt := createAt + sec
+	if sec < 0 {
+		expireAt = -1
+	}
+	e := &entry{createAt: createAt, expireAt: expireAt, v: v}
 	key := BytesToString(k)
 	b.mutex.Lock()
 	b.store[key] = e
@@ -173,7 +183,7 @@ func (m *memory) PutEx(k []byte, v interface{}, sec int64) error {
 	return nil
 }
 
-func (m *memory) Del(k []byte) error {
+func (m *memory) Del(ctx context.Context, k []byte) error {
 	b := m.buckets[m.hashKey(k)]
 	key := BytesToString(k)
 	b.mutex.RLock()
@@ -187,12 +197,12 @@ func (m *memory) Del(k []byte) error {
 	b.mutex.Unlock()
 	h := m.expireHandler
 	if h != nil {
-		h(e.v)
+		h(k, e.v)
 	}
 	return nil
 }
 
-func (m *memory) TTL(k []byte) (int64, error) {
+func (m *memory) TTL(ctx context.Context, k []byte) (int64, error) {
 	b := m.buckets[m.hashKey(k)]
 	key := BytesToString(k)
 	b.mutex.RLock()
@@ -208,13 +218,17 @@ func (m *memory) TTL(k []byte) (int64, error) {
 	return ttl, nil
 }
 
-func (m *memory) Expire(k []byte, sec int64) error {
+func (m *memory) Expire(ctx context.Context, k []byte, sec int64) error {
 	b := m.buckets[m.hashKey(k)]
 	key := BytesToString(k)
 	b.mutex.Lock()
 	e, ok := b.store[key]
 	if ok {
-		e.ex = sec
+		if sec < 0 {
+			e.expireAt = -1
+		} else {
+			e.expireAt = e.createAt + sec
+		}
 	}
 	b.mutex.Unlock()
 	if !ok {
@@ -223,7 +237,7 @@ func (m *memory) Expire(k []byte, sec int64) error {
 	return nil
 }
 
-func (m *memory) Tx(k []byte, fn func(interface{}) (interface{}, error)) error {
+func (m *memory) Tx(ctx context.Context, k []byte, fn func(interface{}) (interface{}, error)) error {
 	b := m.buckets[m.hashKey(k)]
 	key := BytesToString(k)
 	b.mutex.Lock()
@@ -240,6 +254,6 @@ func (m *memory) Tx(k []byte, fn func(interface{}) (interface{}, error)) error {
 	return nil
 }
 
-func (m *memory) ExpireHandler(h func(interface{})) {
+func (m *memory) ExpireHandler(h func([]byte, interface{})) {
 	m.expireHandler = h
 }
