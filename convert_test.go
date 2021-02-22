@@ -3,7 +3,6 @@ package cache
 import "testing"
 
 func Test_Convert(t *testing.T) {
-
 	var a int = 1000
 	var b *int
 	UnsafeConvert(&b, &a)
@@ -15,5 +14,9 @@ func Test_Convert(t *testing.T) {
 	foo_from[1] = "123"
 	UnsafeConvert(&foo_to, &foo_from)
 	t.Log(foo_from, foo_to)
+}
 
+func Test_ConvertValue(t *testing.T) {
+	v, err := -1, error(nil)
+	t.Log(Int(v, err))
 }

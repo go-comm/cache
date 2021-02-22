@@ -103,7 +103,6 @@ func (b *bucket) expire() {
 			h([]byte(keys[i]), v)
 		}
 	}
-
 }
 
 type memory struct {
@@ -160,7 +159,15 @@ func (m *memory) GetAndTTL(ctx context.Context, k []byte) (interface{}, int64, e
 
 func (m *memory) Put(ctx context.Context, k []byte, v interface{}) error {
 	b := m.buckets[m.hashKey(k)]
-	e := &entry{createAt: now(), expireAt: -1, v: v}
+	e := &entry{createAt: now(), expireAt: -1}
+	var err error
+	if event, ok := v.(*Event); ok {
+		if e.v, err = event.Marshal(nil); err != nil {
+			return err
+		}
+	} else {
+		e.v = v
+	}
 	key := BytesToString(k)
 	b.mutex.Lock()
 	b.store[key] = e
@@ -175,7 +182,15 @@ func (m *memory) PutEx(ctx context.Context, k []byte, v interface{}, sec int64) 
 	if sec < 0 {
 		expireAt = -1
 	}
-	e := &entry{createAt: createAt, expireAt: expireAt, v: v}
+	e := &entry{createAt: now(), expireAt: expireAt}
+	var err error
+	if event, ok := v.(*Event); ok {
+		if e.v, err = event.Marshal(nil); err != nil {
+			return err
+		}
+	} else {
+		e.v = v
+	}
 	key := BytesToString(k)
 	b.mutex.Lock()
 	b.store[key] = e

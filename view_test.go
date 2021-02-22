@@ -1,6 +1,9 @@
 package cache
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func Test_UnsafeViewEx(t *testing.T) {
 	m := NewMemery()
@@ -13,7 +16,7 @@ func Test_UnsafeViewEx(t *testing.T) {
 	key := []byte("user/10000")
 	var user *User
 
-	UnsafeViewEx(key, &user, -1, m, func() (interface{}, error) {
+	UnsafeViewEx(context.TODO(), key, &user, -1, m, func() (interface{}, error) {
 		return &User{
 			Name: "10000",
 			Age:  99,

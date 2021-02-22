@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"encoding/binary"
 	"sync"
 	"testing"
@@ -20,14 +21,13 @@ func Test_Concurrent_Memery(t *testing.T) {
 				var key, value [16]byte
 				binary.LittleEndian.PutUint64(key[:], uint64(j))
 				binary.LittleEndian.PutUint64(key[8:], uint64(j))
-				m.Put(key[:], value)
+				m.Put(context.TODO(), key[:], value)
 
-				m.Get(key[:])
+				m.Get(context.TODO(), key[:])
 			}
 		}(i)
 	}
 	wg.Wait()
-
 }
 
 func Test_Concurrent_SyncMap(t *testing.T) {
