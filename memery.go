@@ -16,21 +16,22 @@ func now() int64 {
 args: "{cap:1000}"
 */
 
-func NewMemery(args ...string) Cache {
+func NewMemery(args ...interface{}) Cache {
 	var config struct {
 		Cap int `json:"cap"`
 	}
 	if len(args) > 0 {
-		json.Unmarshal([]byte(args[0]), &config)
+		if vstr, ok := args[0].(string); ok {
+			json.Unmarshal([]byte(vstr), &config)
+		}
 	}
 	bcap := (config.Cap >> 8) * 4 / 3
 	if bcap < 8 {
 		bcap = 8
 	}
-
 	m := &memory{}
 	for i := 0; i < len(m.buckets); i++ {
-		m.buckets[i] = &bucket{store: make(map[string]*entry, bcap), m: m}
+		m.buckets[i] = &bucket{m: m, bcap: bcap}
 	}
 	go m.expireInLoop()
 	return m
@@ -62,6 +63,7 @@ type bucket struct {
 	mutex sync.RWMutex
 	_     [6]uint64
 	m     *memory
+	bcap  int
 	store map[string]*entry
 }
 
@@ -105,8 +107,16 @@ func (b *bucket) expire() {
 	}
 }
 
+func (b *bucket) getStore() map[string]*entry {
+	if b.store == nil {
+		b.store = make(map[string]*entry, b.bcap)
+	}
+	return b.store
+}
+
 type memory struct {
 	buckets       [256]*bucket
+	cap           int
 	expireHandler func([]byte, interface{})
 }
 
@@ -170,7 +180,7 @@ func (m *memory) Put(ctx context.Context, k []byte, v interface{}) error {
 	}
 	key := BytesToString(k)
 	b.mutex.Lock()
-	b.store[key] = e
+	b.getStore()[key] = e
 	b.mutex.Unlock()
 	return nil
 }
@@ -193,7 +203,7 @@ func (m *memory) PutEx(ctx context.Context, k []byte, v interface{}, sec int64) 
 	}
 	key := BytesToString(k)
 	b.mutex.Lock()
-	b.store[key] = e
+	b.getStore()[key] = e
 	b.mutex.Unlock()
 	return nil
 }
@@ -208,7 +218,7 @@ func (m *memory) Del(ctx context.Context, k []byte) error {
 		return ErrNoKey
 	}
 	b.mutex.Lock()
-	delete(b.store, key)
+	delete(b.getStore(), key)
 	b.mutex.Unlock()
 	h := m.expireHandler
 	if h != nil {
