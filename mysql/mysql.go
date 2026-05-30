@@ -13,340 +13,400 @@ import (
 	"github.com/go-comm/cache"
 )
 
-const (
-	createSQL = `CREATE TABLE %s (
-	k varchar(127) NOT NULL,
-	v blob,
-	createAt bigint(20) DEFAULT '0',
-	expireAt bigint(20) DEFAULT '0',
+const createTableSQL = `CREATE TABLE IF NOT EXISTS %s (
+	k varchar(127) NOT NULL DEFAULT '',
+	v blob,           -- blob types: tinyblob(255B) blob(64KB) mediumblob(16MB) longblob(4GB)
+	createdAt bigint NOT NULL DEFAULT 0,
+	expiredAt bigint NOT NULL DEFAULT 0,
 	PRIMARY KEY (k),
-	KEY idx_expireAt (expireAt)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+	KEY idx_expiredAt (expiredAt)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 `
+
+func buildSQL(tableName string) sqlSet {
+	return sqlSet{
+		putSQL: fmt.Sprintf(
+			`INSERT INTO %s (k, v, createdAt, expiredAt) VALUES (?, ?, ?, ?)
+			ON DUPLICATE KEY UPDATE v=VALUES(v), createdAt=VALUES(createdAt), expiredAt=VALUES(expiredAt)`, tableName),
+		getSQL:          fmt.Sprintf(`SELECT v, createdAt, expiredAt FROM %s WHERE k=? LIMIT 1`, tableName),
+		delSQL:          fmt.Sprintf(`DELETE FROM %s WHERE k=?`, tableName),
+		expiredAtRelSQL: fmt.Sprintf(`UPDATE %s SET expiredAt=createdAt+? WHERE k=?`, tableName),
+		expiredAtAbsSQL: fmt.Sprintf(`UPDATE %s SET expiredAt=? WHERE k=?`, tableName),
+		expiredScanSQL:  fmt.Sprintf(`SELECT k FROM %s WHERE expiredAt>=0 AND expiredAt<? LIMIT ?`, tableName),
+		deleteByKeysSQL: fmt.Sprintf(`DELETE FROM %s WHERE k IN`, tableName),
+		clearSQL:        fmt.Sprintf(`DELETE FROM %s`, tableName),
+	}
+}
+
+type sqlSet struct {
+	putSQL, getSQL, delSQL           string
+	expiredAtRelSQL, expiredAtAbsSQL string
+	expiredScanSQL, deleteByKeysSQL  string
+	clearSQL                         string
+}
+
+type Option func(*MysqlCache)
+
+func WithLogger(logger func(v ...interface{})) Option {
+	return func(c *MysqlCache) { c.logger = logger }
+}
+func WithNoExpireCheck() Option {
+	return func(c *MysqlCache) { c.noCheck = true }
+}
+func WithCheckInterval(d time.Duration) Option {
+	return func(c *MysqlCache) { c.checkInterval = d }
+}
+func WithBatchSize(n int) Option {
+	return func(c *MysqlCache) { c.batchSize = n }
+}
+func WithAutoCreateTable() Option {
+	return func(c *MysqlCache) { c.autoCreate = true }
+}
+
+const (
+	defaultCheckInterval = 30 * time.Second
+	minCheckInterval     = 5 * time.Second
+	defaultBatchSize     = 100
 )
+
+type MysqlCache struct {
+	db                  *sql.DB
+	tableName           string
+	sql                 sqlSet
+	checkInterval       time.Duration
+	batchSize           int
+	noCheck, autoCreate bool
+	logger              func(v ...interface{})
+	cancel              context.CancelFunc
+	expireHandler       func(k interface{}, v interface{})
+}
+
+func New(db *sql.DB, tableName string, opts ...Option) (*MysqlCache, error) {
+	if db == nil {
+		return nil, errors.New("mysql cache: db is nil")
+	}
+	if tableName == "" {
+		return nil, errors.New("mysql cache: table name is empty")
+	}
+	c := &MysqlCache{
+		db: db, tableName: tableName, sql: buildSQL(tableName),
+		checkInterval: defaultCheckInterval, batchSize: defaultBatchSize,
+		logger: log.Println,
+	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	if c.checkInterval < minCheckInterval {
+		c.checkInterval = minCheckInterval
+	}
+	if c.batchSize < 1 {
+		c.batchSize = defaultBatchSize
+	}
+	if c.autoCreate {
+		if _, err := db.Exec(fmt.Sprintf(createTableSQL, tableName)); err != nil {
+			return nil, fmt.Errorf("mysql cache: auto create table: %w", err)
+		}
+	}
+	if !c.noCheck {
+		ctx, cancel := context.WithCancel(context.Background())
+		c.cancel = cancel
+		go c.expireLoop(ctx)
+	}
+	return c, nil
+}
+
+func (c *MysqlCache) Close() {
+	if c.cancel != nil {
+		c.cancel()
+	}
+}
+
+func keyToString(k interface{}) string {
+	switch d := k.(type) {
+	case string:
+		return d
+	case []byte:
+		return cache.BytesToStr(d)
+	default:
+		if s, ok := d.(interface{ String() string }); ok {
+			return s.String()
+		}
+		return fmt.Sprintf("%v", d)
+	}
+}
+
+// sqlValue converts v to a type that database/sql can handle natively.
+// Basic types and cache.Valuer are passed through directly — database/sql
+// handles driver.Valuer resolution automatically on ExecContext.
+// Other types are JSON-encoded.
+func sqlValue(v interface{}) (interface{}, error) {
+	switch v.(type) {
+	case string, []byte, json.RawMessage,
+		cache.Valuer,
+		bool,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64:
+		return v, nil
+	default:
+		return json.Marshal(v)
+	}
+}
 
 func now() int64 {
 	return time.Now().Unix()
 }
 
-var (
-	minCheckInterval = time.Second * 5
-)
-
-type MysqlCacheOption func(*mysqlCache)
-
-func WithLogger(logger func(v ...interface{})) MysqlCacheOption {
-	return MysqlCacheOption(func(c *mysqlCache) {
-		c.logger = logger
-	})
-}
-
-func WithNoCheck() MysqlCacheOption {
-	return MysqlCacheOption(func(c *mysqlCache) {
-		c.nocheck = true
-	})
-}
-
-func WithCheckInterval(interval time.Duration) MysqlCacheOption {
-	return MysqlCacheOption(func(c *mysqlCache) {
-		c.interval = interval
-	})
-}
-
-func NewMysqlCache(db *sql.DB, tableName string, opts ...MysqlCacheOption) cache.Cache {
-	if tableName == "" {
-		panic(errors.New("cache: table name invalid"))
-	}
-	c := &mysqlCache{db: db, tableName: tableName}
-
-	c.putsql = fmt.Sprintf("insert into %s (k,v,createAt,expireAt) values(?,?,?,?) on duplicate key update v=values(v),createAt=values(createAt),expireAt=values(expireAt)", tableName)
-	c.getsql = fmt.Sprintf("select v,createAt,expireAt from %s where k=? limit 1", tableName)
-	c.setexpiresql1 = fmt.Sprintf("update from %s expireAt=createAt+? where k=?", tableName)
-	c.setexpiresql2 = fmt.Sprintf("update from %s expireAt=? where k=?", tableName)
-	c.delsql = fmt.Sprintf("delete from %s where k=?", tableName)
-	c.expiresql = fmt.Sprintf("select k,v from %s where expireAt>=0&&expireAt<? limit 5", tableName)
-
-	for _, opt := range opts {
-		opt(c)
-	}
-
-	if c.interval < minCheckInterval {
-		c.interval = minCheckInterval
-	}
-	if c.logger == nil {
-		c.logger = log.Println
-	}
-	if !c.nocheck {
-		ctx := context.Background()
-		ctx, c.cancel = context.WithCancel(ctx)
-		go c.expireInLoop(ctx)
-	}
-	return c
-}
-
-type entry struct {
-	k        string
-	v        []byte
-	createAt int64
-	expireAt int64
-}
-
-func (e *entry) Expired() bool {
-	return e.TTL() == 0
-}
-
-// TTL -1: never expired, 0: expired, >0: not expired
-func (e *entry) TTL() int64 {
-	if e.expireAt < 0 {
+func entryTTL(expiredAt int64) int64 {
+	if expiredAt < 0 {
 		return -1
 	}
-	ttl := e.expireAt - now()
+	ttl := expiredAt - now()
 	if ttl < 0 {
-		ttl = 0
+		return 0
 	}
 	return ttl
 }
 
-type mysqlCache struct {
-	db            *sql.DB
-	tableName     string
-	getsql        string
-	putsql        string
-	delsql        string
-	setexpiresql1 string
-	setexpiresql2 string
-	expiresql     string
-	delexpiresql  string
-	interval      time.Duration
-	nocheck       bool
-	expireHandler func([]byte, interface{})
-	logger        func(...interface{})
-	cancel        context.CancelFunc
-}
-
-func (c *mysqlCache) expireInLoop(ctx context.Context) {
-	ticker := time.NewTicker(c.interval)
-
-LOOP:
-	for {
-		select {
-		case <-ticker.C:
-		case <-ctx.Done():
-			break LOOP
-		}
-		c.expires(ctx)
-	}
-}
-
-func (c *mysqlCache) expires(ctx context.Context) {
-	defer func() {
-		if err := recover(); err != nil {
-			c.logger(err)
-		}
-	}()
-
-	for {
-		done, err := c.deleteExpires(ctx)
-		if err != nil {
-			c.logger(err)
-			break
-		}
-		if done {
-			break
-		}
-	}
-}
-
-func (c *mysqlCache) deleteExpires(ctx context.Context) (done bool, err error) {
-	var rows *sql.Rows
-	rows, err = c.db.Query(c.expiresql, now())
-	if err != nil {
-		return
-	}
-	defer rows.Close()
-
-	var ls []*entry
-
-	for rows.Next() {
-		var e entry
-		err = rows.Scan(&e.k, &e.v)
-		if err != nil {
-			break
-		}
-		ls = append(ls, &e)
-	}
-	if err != nil {
-		return
-	}
-	if len(ls) <= 0 {
-		done = true
-		return
-	}
-	var sqlBuilder strings.Builder
-	sqlBuilder.WriteString("delete from ")
-	sqlBuilder.WriteString(c.tableName)
-	sqlBuilder.WriteString(" where k in(")
-	sqlBuilder.WriteByte('\'')
-	sqlBuilder.WriteString(ls[0].k)
-	sqlBuilder.WriteByte('\'')
-	for i := len(ls) - 1; i >= 1; i-- {
-		sqlBuilder.WriteString(",'")
-		sqlBuilder.WriteString(ls[i].k)
-		sqlBuilder.WriteByte('\'')
-	}
-	sqlBuilder.WriteByte(')')
-	_, err = c.db.Exec(sqlBuilder.String())
-	if err != nil {
-		return
-	}
-	if len(ls) < 5 {
-		done = true
-		return
-	}
-	h := c.expireHandler
-	if h != nil {
-		for _, e := range ls {
-			h([]byte(e.k), e.v)
-		}
-	}
-	return
-}
-
-func (c *mysqlCache) Get(ctx context.Context, k []byte) (interface{}, error) {
-	v, _, err := c.GetAndTTL(ctx, k)
+func (c *MysqlCache) Get(ctx context.Context, k interface{}) (interface{}, error) {
+	v, _, err := c.getInternal(ctx, k)
 	return v, err
 }
 
-func (c *mysqlCache) GetAndTTL(ctx context.Context, k []byte) (interface{}, int64, error) {
-	var err error
-	row := c.db.QueryRowContext(ctx, c.getsql, cache.BytesToString(k))
-	var e entry
-	err = row.Scan(&e.v, &e.createAt, &e.expireAt)
+func (c *MysqlCache) GetAndTTL(ctx context.Context, k interface{}) (interface{}, int64, error) {
+	return c.getInternal(ctx, k)
+}
+
+func (c *MysqlCache) getInternal(ctx context.Context, k interface{}) (interface{}, int64, error) {
+	key := keyToString(k)
+	var v []byte
+	var createdAt, expiredAt int64
+	err := c.db.QueryRowContext(ctx, c.sql.getSQL, key).Scan(&v, &createdAt, &expiredAt)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, 0, cache.ErrNoKey
 		}
 		return nil, 0, err
 	}
-	ttl := e.TTL()
+	ttl := entryTTL(expiredAt)
 	if ttl == 0 {
 		return nil, 0, cache.ErrNoKey
 	}
-	return e.v, ttl, nil
+	return v, ttl, nil
 }
 
-func (c *mysqlCache) TTL(ctx context.Context, k []byte) (int64, error) {
-	_, ttl, err := c.GetAndTTL(ctx, k)
+func (c *MysqlCache) TTL(ctx context.Context, k interface{}) (int64, error) {
+	_, ttl, err := c.getInternal(ctx, k)
 	return ttl, err
 }
 
-func (c *mysqlCache) Expire(ctx context.Context, k []byte, sec int64) error {
-	var sqlStr = c.setexpiresql1
-	if sec < 0 {
-		sqlStr = c.setexpiresql2
-		sec = -1
-	}
-	rs, err := c.db.ExecContext(ctx, sqlStr, sec, cache.BytesToString(k))
+func (c *MysqlCache) Scan(ctx context.Context, k interface{}, scan cache.Scanner) error {
+	v, err := c.Get(ctx, k)
 	if err != nil {
 		return err
 	}
-	a, err := rs.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if a <= 0 {
-		return cache.ErrNoKey
-	}
-	return err
+	return scan.Scan(v)
 }
 
-func (c *mysqlCache) Put(ctx context.Context, k []byte, v interface{}) error {
+func (c *MysqlCache) ScanAndTTL(ctx context.Context, k interface{}, scan cache.Scanner) (int64, error) {
+	v, ttl, err := c.getInternal(ctx, k)
+	if err != nil {
+		return 0, err
+	}
+	return ttl, scan.Scan(v)
+}
+
+func (c *MysqlCache) Put(ctx context.Context, k interface{}, v interface{}) error {
 	return c.PutEx(ctx, k, v, -1)
 }
 
-func (c *mysqlCache) PutEx(ctx context.Context, k []byte, v interface{}, sec int64) error {
-	var b []byte
-	var err error
-	switch p := v.(type) {
-	case []byte:
-		b = p
-	case json.RawMessage:
-		b = p
-	case *cache.Event:
-		b, err = p.Marshal(nil)
-	default:
-		return fmt.Errorf("cache: value %v invalid", v)
+func (c *MysqlCache) PutEx(ctx context.Context, k interface{}, v interface{}, sec int64) error {
+	key := keyToString(k)
+	b, err := sqlValue(v)
+	if err != nil {
+		return fmt.Errorf("mysql cache: resolve value: %w", err)
 	}
-	createAt := now()
-	expireAt := createAt + sec
-	if sec < 0 {
-		expireAt = -1
+	createdAt := now()
+	expiredAt := int64(-1)
+	if sec >= 0 {
+		expiredAt = createdAt + sec
 	}
-	_, err = c.db.ExecContext(ctx, c.putsql, cache.BytesToString(k), b, createAt, expireAt)
+	_, err = c.db.ExecContext(ctx, c.sql.putSQL, key, b, createdAt, expiredAt)
 	return err
 }
 
-func (c *mysqlCache) Del(ctx context.Context, k []byte) error {
-	var err error
-	var v interface{}
-	h := c.expireHandler
-	if h != nil {
-		v, _, err = c.GetAndTTL(ctx, k)
-		if err != nil {
-			return err
-		}
-	}
-	_, err = c.db.ExecContext(ctx, c.delsql, cache.BytesToString(k))
-	if err != nil {
-		return err
-	}
-	if h != nil {
-		h(k, v)
-	}
-	return err
-}
-
-func (c *mysqlCache) Tx(ctx context.Context, k []byte, fn func(interface{}) (interface{}, error)) error {
-	tx, err := c.db.Begin()
-	if err != nil {
-		return err
-	}
-	err = func() error {
+func (c *MysqlCache) Del(ctx context.Context, k interface{}) error {
+	key := keyToString(k)
+	var val interface{}
+	var hasVal bool
+	if c.expireHandler != nil {
 		var err error
-		row := tx.QueryRowContext(ctx, c.getsql, cache.BytesToString(k))
-		var e entry
-		err = row.Scan(&e.v, &e.createAt, &e.expireAt)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				return cache.ErrNoKey
-			}
+		val, _, err = c.getInternal(ctx, k)
+		if err != nil && !errors.Is(err, cache.ErrNoKey) {
 			return err
 		}
-		if e.Expired() {
+		hasVal = err == nil
+	}
+	rs, err := c.db.ExecContext(ctx, c.sql.delSQL, key)
+	if err != nil {
+		return err
+	}
+	n, _ := rs.RowsAffected()
+	if n == 0 {
+		return cache.ErrNoKey
+	}
+	if hasVal && c.expireHandler != nil {
+		go c.expireHandler(k, val)
+	}
+	return nil
+}
+
+func (c *MysqlCache) Expire(ctx context.Context, k interface{}, sec int64) error {
+	key := keyToString(k)
+	var sqlStr string
+	var arg int64
+	if sec < 0 {
+		sqlStr = c.sql.expiredAtAbsSQL
+		arg = -1
+	} else {
+		sqlStr = c.sql.expiredAtRelSQL
+		arg = sec
+	}
+	rs, err := c.db.ExecContext(ctx, sqlStr, arg, key)
+	if err != nil {
+		return err
+	}
+	n, _ := rs.RowsAffected()
+	if n == 0 {
+		return cache.ErrNoKey
+	}
+	return nil
+}
+
+func (c *MysqlCache) Clear(ctx context.Context) error {
+	_, err := c.db.ExecContext(ctx, c.sql.clearSQL)
+	return err
+}
+
+func (c *MysqlCache) Tx(ctx context.Context, k interface{}, fn func(*cache.Entry) error) error {
+	if fn == nil {
+		return errors.New("mysql cache: tx fn is nil")
+	}
+	key := keyToString(k)
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	getForUpdate := c.sql.getSQL + ` FOR UPDATE`
+	var v []byte
+	var createdAt, expiredAt int64
+	err = tx.QueryRowContext(ctx, getForUpdate, key).Scan(&v, &createdAt, &expiredAt)
+	if err != nil {
+		tx.Rollback()
+		if errors.Is(err, sql.ErrNoRows) {
 			return cache.ErrNoKey
 		}
-		o, err := fn(e.v)
-		var b []byte
-		switch p := o.(type) {
-		case []byte:
-			b = p
-		case json.RawMessage:
-			b = p
-		case *cache.Event:
-			b, err = p.Marshal(nil)
-		default:
-			return fmt.Errorf("cache: value %v invalid", e.v)
-		}
-		_, err = c.db.ExecContext(ctx, c.putsql, cache.BytesToString(k), b, e.createAt, e.expireAt)
 		return err
-	}()
-
+	}
+	if entryTTL(expiredAt) == 0 {
+		tx.Rollback()
+		return cache.ErrNoKey
+	}
+	e := &cache.Entry{Value: v, CreatedAt: createdAt, ExpiredAt: expiredAt}
+	err = fn(e)
 	if err != nil {
-		return tx.Rollback()
+		tx.Rollback()
+		return err
+	}
+	resolved, err := sqlValue(e.Value)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("mysql cache: tx resolve value: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, c.sql.putSQL, key, resolved, e.CreatedAt, e.ExpiredAt)
+	if err != nil {
+		tx.Rollback()
+		return err
 	}
 	return tx.Commit()
 }
 
-func (c *mysqlCache) ExpireHandler(h func([]byte, interface{})) {
+func (c *MysqlCache) ExpireHandler(h func(k interface{}, v interface{})) {
 	c.expireHandler = h
+}
+
+func (c *MysqlCache) expireLoop(ctx context.Context) {
+	ticker := time.NewTicker(c.checkInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return
+		}
+		c.cleanupExpired(ctx)
+	}
+}
+
+func (c *MysqlCache) cleanupExpired(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.logger("mysql cache: expire panic:", r)
+		}
+	}()
+	for {
+		done, err := c.deleteExpiredBatch(ctx)
+		if err != nil {
+			c.logger("mysql cache: expire cleanup:", err)
+			return
+		}
+		if done {
+			return
+		}
+	}
+}
+
+func (c *MysqlCache) deleteExpiredBatch(ctx context.Context) (bool, error) {
+	rows, err := c.db.QueryContext(ctx, c.sql.expiredScanSQL, now(), c.batchSize)
+	if err != nil {
+		return false, err
+	}
+	var keys []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			rows.Close()
+			return false, err
+		}
+		keys = append(keys, k)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	if len(keys) == 0 {
+		return true, nil
+	}
+	var sb strings.Builder
+	sb.WriteString(c.sql.deleteByKeysSQL)
+	sb.WriteString(" (")
+	args := make([]interface{}, len(keys))
+	for i, k := range keys {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteByte('?')
+		args[i] = k
+	}
+	sb.WriteByte(')')
+	_, err = c.db.ExecContext(ctx, sb.String(), args...)
+	if err != nil {
+		return false, err
+	}
+	if c.expireHandler != nil {
+		for _, k := range keys {
+			go c.expireHandler(k, nil)
+		}
+	}
+	return len(keys) < c.batchSize, nil
 }

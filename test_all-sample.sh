@@ -1,0 +1,1 @@
+CACHE_MYSQL_DSN='root:password@tcp(127.0.0.1:3306)/test?parseTime=true' go test ./... -v -count=1 -timeout 30s

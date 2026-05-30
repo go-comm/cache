@@ -1,8 +1,5 @@
 module github.com/go-comm/cache
 
-go 1.12
+go 1.15
 
-require (
-	github.com/golang/protobuf v1.4.3
-	github.com/json-iterator/go v1.1.10
-)
+require github.com/go-sql-driver/mysql v1.8.0
