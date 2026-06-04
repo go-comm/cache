@@ -25,6 +25,7 @@ type Cache interface {
 	Expire(ctx context.Context, k interface{}, sec int64) error
 	Tx(ctx context.Context, k interface{}, fn func(*Entry) error) error
 	ExpireHandler(h func(k interface{}, v interface{}))
+	Range(ctx context.Context, fn func(k interface{}, v interface{}) error) error
 	Clear(ctx context.Context) error
 }
 

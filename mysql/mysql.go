@@ -283,6 +283,61 @@ func (c *MysqlCache) Expire(ctx context.Context, k interface{}, sec int64) error
 	return nil
 }
 
+// Range iterates over all non-expired entries in the cache using cursor-based
+// pagination on the primary key (k) to avoid a single full table scan.
+// The iteration stops if fn returns an error, and that error is returned.
+func (c *MysqlCache) Range(ctx context.Context, fn func(k interface{}, v interface{}) error) error {
+	const pageSize = 500
+	var lastKey string
+	for {
+		newKey, hasRow, err := c.rangeScan(ctx, lastKey, pageSize, fn)
+		if err != nil {
+			return err
+		}
+		if !hasRow {
+			break
+		}
+		lastKey = newKey
+	}
+	return nil
+}
+
+// rangeScan queries a single page of rows and invokes fn for each non-expired entry.
+// It returns the last key of the page, whether any row was found, and any error.
+func (c *MysqlCache) rangeScan(ctx context.Context, lastKey string, limit int, fn func(k interface{}, v interface{}) error) (string, bool, error) {
+	rows, err := c.db.QueryContext(ctx,
+		"SELECT k, v, expiredAt FROM "+c.tableName+" WHERE k > ? ORDER BY k LIMIT ?",
+		lastKey, limit)
+	if err != nil {
+		return lastKey, false, err
+	}
+	defer rows.Close()
+
+	hasRow := false
+	for rows.Next() {
+		hasRow = true
+		var k string
+		var v []byte
+		var expiredAt int64
+		if err := rows.Scan(&k, &v, &expiredAt); err != nil {
+			return lastKey, false, err
+		}
+		// Always advance the cursor, even for expired entries,
+		// to avoid an infinite loop on a page full of expired rows.
+		lastKey = k
+		if entryTTL(expiredAt) == 0 {
+			continue
+		}
+		if err := fn(k, v); err != nil {
+			return lastKey, false, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return lastKey, false, err
+	}
+	return lastKey, hasRow, nil
+}
+
 func (c *MysqlCache) Clear(ctx context.Context) error {
 	_, err := c.db.ExecContext(ctx, c.sql.clearSQL)
 	return err

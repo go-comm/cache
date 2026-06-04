@@ -426,3 +426,145 @@ func TestConcurrent(t *testing.T) {
 		<-done
 	}
 }
+
+// ==================== Range ====================
+
+func TestRangeBasic(t *testing.T) {
+	c := newCache()
+	ctx := context.Background()
+
+	// populate
+	c.Put(ctx, "a", 1)
+	c.Put(ctx, "b", 2)
+	c.Put(ctx, "c", 3)
+
+	collected := make(map[string]int)
+	err := c.Range(ctx, func(k interface{}, v interface{}) error {
+		collected[k.(string)] = v.(int)
+		return nil
+	})
+	if err != nil {
+		t.Fatal("Range failed:", err)
+	}
+	if len(collected) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(collected))
+	}
+	if collected["a"] != 1 || collected["b"] != 2 || collected["c"] != 3 {
+		t.Fatalf("unexpected values: %v", collected)
+	}
+}
+
+func TestRangeEmptyCache(t *testing.T) {
+	c := newCache()
+	ctx := context.Background()
+
+	count := 0
+	err := c.Range(ctx, func(k interface{}, v interface{}) error {
+		count++
+		return nil
+	})
+	if err != nil {
+		t.Fatal("Range on empty cache should not error:", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 entries, got %d", count)
+	}
+}
+
+func TestRangeUninitialized(t *testing.T) {
+	c := NewMemory() // no writes, buckets nil
+	ctx := context.Background()
+
+	count := 0
+	err := c.Range(ctx, func(k interface{}, v interface{}) error {
+		count++
+		return nil
+	})
+	if err != nil {
+		t.Fatal("Range on uninitialized cache should not error:", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 entries, got %d", count)
+	}
+}
+
+func TestRangeSkipExpired(t *testing.T) {
+	c := newCache()
+	ctx := context.Background()
+
+	c.Put(ctx, "fresh", 1)
+	c.PutEx(ctx, "stale", 2, 0) // immediate expiry
+	time.Sleep(10 * time.Millisecond)
+
+	collected := make(map[string]int)
+	err := c.Range(ctx, func(k interface{}, v interface{}) error {
+		collected[k.(string)] = v.(int)
+		return nil
+	})
+	if err != nil {
+		t.Fatal("Range failed:", err)
+	}
+	if len(collected) != 1 {
+		t.Fatalf("expected 1 non-expired entry, got %d", len(collected))
+	}
+	if collected["fresh"] != 1 {
+		t.Fatalf("expected fresh=1, got %v", collected)
+	}
+	if _, exists := collected["stale"]; exists {
+		t.Fatal("stale entry should be skipped")
+	}
+}
+
+func TestRangeEarlyExit(t *testing.T) {
+	c := newCache()
+	ctx := context.Background()
+
+	for i := 0; i < 10; i++ {
+		c.Put(ctx, string(rune('a'+i)), i)
+	}
+
+	count := 0
+	err := c.Range(ctx, func(k interface{}, v interface{}) error {
+		count++
+		if count >= 3 {
+			return context.Canceled // simulate early exit
+		}
+		return nil
+	})
+	if err != context.Canceled {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	// We can't assert exact count due to sharding order, but it should be >= 3 and < 10
+	if count < 3 || count > 10 {
+		t.Fatalf("expected count in [3,10], got %d", count)
+	}
+}
+
+func TestRangeCallbackCanWrite(t *testing.T) {
+	c := newCache()
+	ctx := context.Background()
+
+	c.Put(ctx, "a", 1)
+	c.Put(ctx, "b", 2)
+
+	// Writes in the callback should not deadlock.
+	err := c.Range(ctx, func(k interface{}, v interface{}) error {
+		c.Put(ctx, "c", 3)
+		c.Del(ctx, k)
+		return nil
+	})
+	if err != nil {
+		t.Fatal("Range with write in callback failed:", err)
+	}
+
+	// original keys were deleted
+	_, err = c.Get(ctx, "a")
+	if err != ErrNoKey {
+		t.Fatalf("expected a to be deleted")
+	}
+	_, err = c.Get(ctx, "b")
+	if err != ErrNoKey {
+		t.Fatalf("expected b to be deleted")
+	}
+	// "c" may or may not exist depending on bucket iteration order — no assertion needed.
+}

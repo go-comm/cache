@@ -393,6 +393,41 @@ func (m *Memory) ScanAndTTL(ctx context.Context, k interface{}, scan Scanner) (i
 	return ttl, scan.Scan(v)
 }
 
+// Range iterates over all entries in the cache.
+// It snapshots one bucket at a time, then calls fn for each entry in that bucket
+// without holding any locks, so the callback can safely perform cache writes.
+// The iteration stops if fn returns an error, and that error is returned.
+// Safe to call on uninitialized cache (no-op).
+func (m *Memory) Range(ctx context.Context, fn func(k interface{}, v interface{}) error) error {
+	if m.buckets[0] == nil {
+		return nil
+	}
+
+	type pair struct {
+		k interface{}
+		v interface{}
+	}
+	for _, b := range m.buckets {
+		// Snapshot one bucket under lock.
+		b.mu.RLock()
+		snapshot := make([]pair, 0, len(b.store))
+		for k, e := range b.store {
+			if !e.Expired() {
+				snapshot = append(snapshot, pair{k, e.Value})
+			}
+		}
+		b.mu.RUnlock()
+
+		// Iterate over this bucket's snapshot without holding the lock.
+		for _, p := range snapshot {
+			if err := fn(p.k, p.v); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // Clear removes all entries from the cache.
 // Safe to call on uninitialized cache (no-op).
 func (m *Memory) Clear(ctx context.Context) error {

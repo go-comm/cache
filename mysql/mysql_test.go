@@ -420,3 +420,141 @@ func TestMysqlEncodeDecodeRoundTrip(t *testing.T) {
 		t.Fatalf("expected {localhost 3306}, got %+v", cfg)
 	}
 }
+
+// ============================================================================
+// Range (isolated table per test to avoid data pollution)
+// ============================================================================
+
+func newRangeTestCache(t *testing.T) (*MysqlCache, func()) {
+	db := getTestDB(t)
+	tbl := "cache_range_" + time.Now().Format("150405") + "_" + t.Name()[len("TestMysqlRange"):]
+	c, err := New(db, tbl, WithAutoCreateTable(), WithNoExpireCheck())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cleanup := func() {
+		c.Close()
+		db.Exec("DROP TABLE IF EXISTS " + tbl)
+		db.Close()
+	}
+	return c, cleanup
+}
+
+func TestMysqlRangeBasic(t *testing.T) {
+	c, cleanup := newRangeTestCache(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	c.Put(ctx, "a", []byte("1"))
+	c.Put(ctx, "b", []byte("2"))
+	c.Put(ctx, "c", []byte("3"))
+
+	collected := make(map[string]string)
+	err := c.Range(ctx, func(k interface{}, v interface{}) error {
+		collected[k.(string)] = string(v.([]byte))
+		return nil
+	})
+	if err != nil {
+		t.Fatal("Range failed:", err)
+	}
+	if len(collected) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(collected))
+	}
+	if collected["a"] != "1" || collected["b"] != "2" || collected["c"] != "3" {
+		t.Fatalf("unexpected values: %v", collected)
+	}
+}
+
+func TestMysqlRangeEmpty(t *testing.T) {
+	c, cleanup := newRangeTestCache(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	count := 0
+	err := c.Range(ctx, func(k interface{}, v interface{}) error {
+		count++
+		return nil
+	})
+	if err != nil {
+		t.Fatal("Range on empty table should not error:", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 entries, got %d", count)
+	}
+}
+
+func TestMysqlRangeSkipExpired(t *testing.T) {
+	c, cleanup := newRangeTestCache(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	c.Put(ctx, "fresh", []byte("ok"))
+	c.PutEx(ctx, "stale", []byte("nope"), 0)
+	time.Sleep(1500 * time.Millisecond) // ensure stale entry is definitively expired
+
+	collected := make(map[string]string)
+	err := c.Range(ctx, func(k interface{}, v interface{}) error {
+		collected[k.(string)] = string(v.([]byte))
+		return nil
+	})
+	if err != nil {
+		t.Fatal("Range failed:", err)
+	}
+	if len(collected) != 1 {
+		t.Fatalf("expected 1 non-expired entry, got %d", len(collected))
+	}
+	if collected["fresh"] != "ok" {
+		t.Fatalf("expected fresh=ok, got %v", collected)
+	}
+	if _, exists := collected["stale"]; exists {
+		t.Fatal("stale entry should be skipped")
+	}
+}
+
+func TestMysqlRangeEarlyExit(t *testing.T) {
+	c, cleanup := newRangeTestCache(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		c.Put(ctx, string(rune('a'+i)), []byte{byte(i)})
+	}
+
+	count := 0
+	err := c.Range(ctx, func(k interface{}, v interface{}) error {
+		count++
+		if count >= 2 {
+			return context.Canceled
+		}
+		return nil
+	})
+	if err != context.Canceled {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected count=2, got %d", count)
+	}
+}
+
+func TestMysqlRangeCursorPagination(t *testing.T) {
+	c, cleanup := newRangeTestCache(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	n := 10
+	for i := 0; i < n; i++ {
+		c.Put(ctx, "cursor_"+string(rune('a'+i)), []byte{byte(i)})
+	}
+
+	count := 0
+	err := c.Range(ctx, func(k interface{}, v interface{}) error {
+		count++
+		return nil
+	})
+	if err != nil {
+		t.Fatal("Range failed:", err)
+	}
+	if count != n {
+		t.Fatalf("expected %d entries, got %d", n, count)
+	}
+}
