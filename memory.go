@@ -245,24 +245,7 @@ func (m *Memory) TTL(ctx context.Context, k interface{}) (int64, error) {
 // Put stores a value with no expiration.
 // Triggers lazy initialization on first call.
 func (m *Memory) Put(ctx context.Context, k interface{}, v interface{}) error {
-	m.ensureStarted()
-
-	keyStr, idx := hashKey(k)
-	b := m.buckets[idx]
-
-	var err error
-	if vv, ok := v.(Valuer); ok {
-		if v, err = vv.Value(); err != nil {
-			return err
-		}
-	}
-
-	nowTime := now()
-	e := &Entry{CreatedAt: nowTime, ExpiredAt: -1, Value: v} // -1 = never expire
-	b.mu.Lock()
-	b.store[keyStr] = e
-	b.mu.Unlock()
-	return nil
+	return m.PutEx(ctx, k, v, -1)
 }
 
 // PutEx stores a value with TTL in seconds.
