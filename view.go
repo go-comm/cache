@@ -104,7 +104,7 @@ type SingleflightGroup interface {
 	Do(key string, fn func() (interface{}, error)) (v interface{}, err error, shared bool)
 }
 
-// ViewWithSingleflightEx performs a cache-aside lookup with singleflight coalescing.
+// ViewExWithSingleflight performs a cache-aside lookup with singleflight coalescing.
 // It first attempts to get the key from the cache. On hit, it returns the value.
 // On miss, it uses the provided SingleflightGroup g to ensure that only one call
 // executes fn() for the given key concurrently; other callers wait for that single
@@ -117,10 +117,10 @@ type SingleflightGroup interface {
 // Example:
 //
 //	var sfGroup singleflight.Group
-//	val, err := ViewWithSingleflightEx(ctx, "key", 60, cache, &sfGroup, func() (interface{}, error) {
+//	val, err := ViewExWithSingleflight(ctx, "key", 60, cache, &sfGroup, func() (interface{}, error) {
 //	    return expensiveQuery(), nil
 //	})
-func ViewWithSingleflightEx(ctx context.Context, k interface{}, ex int64, c Cache, g SingleflightGroup, fn func() (interface{}, error)) (interface{}, error) {
+func ViewExWithSingleflight(ctx context.Context, k interface{}, ex int64, c Cache, g SingleflightGroup, fn func() (interface{}, error)) (interface{}, error) {
 	v, err := c.Get(ctx, k)
 	if err == nil {
 		return v, nil
@@ -137,6 +137,55 @@ func ViewWithSingleflightEx(ctx context.Context, k interface{}, ex int64, c Cach
 		return v, nil
 	})
 	return ret, err
+}
+
+// ViewScanExWithSingleflight is a cache-aside pattern that uses Scan to assign the cached value
+// into the target via a Scanner, with singleflight coalescing to prevent cache stampede.
+// On cache hit, the value is scanned into scan and returns nil.
+// On cache miss, it uses the provided SingleflightGroup g to ensure that only one call
+// executes fn() for the given key concurrently; other callers wait for that single call
+// to complete and share its result. The returned value is stored in the cache with the
+// given TTL (ex seconds) before being scanned.
+//
+// fn returns a Valuer, which is serialized via Value() and stored. The stored value is then
+// scanned into the provided Scanner.
+//
+// Example:
+//
+//	var sfGroup singleflight.Group
+//	var user User
+//	err := ViewScanExWithSingleflight(ctx, "user:1", 60, cache, &sfGroup, DecodeScanner(&user), func() (Valuer, error) {
+//	    u, err := db.GetUser(1)
+//	    return EncodeValuer(&u), err
+//	})
+func ViewScanExWithSingleflight(ctx context.Context, k interface{}, ex int64, c Cache, g SingleflightGroup, scan Scanner, fn func() (Valuer, error)) error {
+	// Fast path: cache hit, scan directly
+	err := c.Scan(ctx, k, scan)
+	if err == nil {
+		return nil
+	}
+	if fn == nil {
+		return errors.New("function is nil")
+	}
+	// Use singleflight to ensure fn is called only once for this key
+	ret, err, _ := g.Do(keyStr(k), func() (interface{}, error) {
+		v, err := fn()
+		if err != nil {
+			return nil, err
+		}
+		bv, err := v.Value()
+		if err != nil {
+			return nil, err
+		}
+		// Store in cache (ignore error as it does not affect the returned value)
+		_ = c.PutEx(ctx, k, bv, ex)
+		return bv, nil
+	})
+	if err != nil {
+		return err
+	}
+	// Scan the obtained value into the user's scanner
+	return scan.Scan(ret)
 }
 
 func keyStr(k interface{}) string {
